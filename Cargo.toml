@@ -2,3 +2,9 @@
 name = "musikquadrupled"
 version = "0.1.0"
 edition = "2021"
+
+[dependencies]
+axum = "0.6"
+axum-server = {version = "0.4", features = ["tls-rustls"]}
+tokio = {version = "1", features = ["rt-multi-thread"]}
+dotenvy = "0.15"

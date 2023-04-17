@@ -25,7 +25,9 @@
         nci.crates.${crateName} = {
           export = true;
         };
-        devShells.default = crateOutputs.devShell;
+        devShells.default = crateOutputs.devShell.overrideAttrs (old: {
+          RUST_SRC_PATH = "${config.nci.toolchains.shell}/lib/rustlib/src/rust/library";
+        });
         packages.default = crateOutputs.packages.release;
       };
     };
