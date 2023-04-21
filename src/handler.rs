@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::{fmt::Display, net::SocketAddr};
 
 use super::AppError;
 use async_tungstenite::{
@@ -28,8 +28,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::net::TcpStream;
 use tower_http::{
-    cors::CorsLayer,
-    trace::{DefaultMakeSpan, TraceLayer},
+    cors::CorsLayer, sensitive_headers::SetSensitiveRequestHeadersLayer, trace::TraceLayer,
 };
 use tracing::{Instrument, Span};
 
@@ -61,9 +60,76 @@ async fn block_external_ips<B>(
     }
 }
 
+struct ComponentDisplay<Left, Right> {
+    left: Left,
+    right: Right,
+}
+
+impl<'a, 'b> ComponentDisplay<&'a str, &'b str> {
+    fn is_empty(&self) -> bool {
+        self.left.is_empty() && self.right.is_empty()
+    }
+}
+
+impl<Left, Right> Display for ComponentDisplay<Left, Right>
+where
+    Left: Display,
+    Right: Display,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}{}", self.left, self.right)
+    }
+}
+
+fn make_span_trace<B>(req: &Request<B>) -> Span {
+    let uri_query_filtered = req
+        .uri()
+        .query()
+        .map(|q| {
+            let token_start = q.find("&token=");
+            if let Some(pos) = token_start {
+                let (left, right) = q.split_at(pos);
+                let (_, right) = right.split_at(pos + 6 + 30);
+                return ComponentDisplay { left, right };
+            }
+            let token_start = q.find("token=");
+            if let Some(_) = token_start {
+                let (_, right) = q.split_at(6 + 30);
+                return ComponentDisplay { left: "", right };
+            }
+            ComponentDisplay { left: q, right: "" }
+        })
+        .unwrap_or(ComponentDisplay {
+            left: "",
+            right: "",
+        });
+    let uri_path = ComponentDisplay {
+        left: {
+            if !uri_query_filtered.is_empty() {
+                ComponentDisplay {
+                    left: req.uri().path(),
+                    right: "?",
+                }
+            } else {
+                ComponentDisplay {
+                    left: req.uri().path(),
+                    right: "",
+                }
+            }
+        },
+        right: uri_query_filtered,
+    };
+    tracing::debug_span!(
+        "request",
+        method = %req.method(),
+        uri = %uri_path,
+        version = ?req.version(),
+        headers = ?req.headers(),
+    )
+}
+
 pub(super) async fn handler(state: AppState) -> Result<Router, AppError> {
-    let trace_layer =
-        TraceLayer::new_for_http().make_span_with(DefaultMakeSpan::default().include_headers(true));
+    let trace_layer = TraceLayer::new_for_http().make_span_with(make_span_trace);
 
     let internal_router = Router::new()
         .route("/token/generate", get(generate_token))
@@ -71,9 +137,10 @@ pub(super) async fn handler(state: AppState) -> Result<Router, AppError> {
         .layer(axum::middleware::from_fn(block_external_ips));
 
     let router = Router::new()
-        .route("/thumbnails/:id", get(http))
+        .route("/thumbnail/:id", get(http))
         .route("/audio/id/:id", get(http))
         .route("/", get(metadata_ws))
+        .layer(SetSensitiveRequestHeadersLayer::new([AUTHORIZATION]))
         .layer(trace_layer)
         .layer(
             CorsLayer::new()
