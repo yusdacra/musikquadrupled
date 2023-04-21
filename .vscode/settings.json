@@ -1,5 +1,0 @@
-{
-    "rust-analyzer.diagnostics.experimental.enable": true,
-    "rust-analyzer.typing.autoClosingAngleBrackets.enable": true,
-    "rust-analyzer.server.path": "rust-analyzer"
-}
