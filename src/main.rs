@@ -1,11 +1,11 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, process::ExitCode, sync::Arc};
 
 use axum_server::tls_rustls::RustlsConfig;
 use dotenvy::Error as DotenvError;
 use error::AppError;
 use hyper::{client::HttpConnector, Body};
 use token::Tokens;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 use tracing_subscriber::prelude::*;
 
 mod error;
@@ -13,8 +13,13 @@ mod handler;
 mod token;
 
 #[tokio::main]
-async fn main() {
-    app().await.unwrap();
+async fn main() -> ExitCode {
+    if let Err(err) = app().await {
+        tracing::error!("aborting: {err}");
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
 async fn app() -> Result<(), AppError> {
@@ -48,14 +53,16 @@ async fn app() -> Result<(), AppError> {
     let (task, scheme) = if let (Some(cert_path), Some(key_path)) = (cert_path, key_path) {
         info!("cert path is: {cert_path}");
         info!("key path is: {key_path}");
-        let config = RustlsConfig::from_pem_file(cert_path, key_path)
-            .await
-            .unwrap();
+        let config = RustlsConfig::from_pem_file(cert_path, key_path).await?;
         let task = tokio::spawn(axum_server::bind_rustls(addr, config).serve(make_service));
         (task, "https")
-    } else {
+    } else if get_conf("INSECURE").ok().is_some() {
+        tracing::warn!("RUNNING IN INSECURE MODE (NO TLS)");
         let task = tokio::spawn(axum_server::bind(addr).serve(make_service));
         (task, "http")
+    } else {
+        tracing::warn!("note: either one or both of MUSIKQUAD_TLS_CERT_PATH and MUSIKQUAD_TLS_KEY_PATH has not been set");
+        return Err("will not serve HTTP unless the MUSIKQUAD_INSECURE env var is set".into());
     };
 
     info!("listening on {scheme}://{addr}");
@@ -68,21 +75,7 @@ fn get_conf(key: &str) -> Result<String, AppError> {
     const ENV_NAMESPACE: &str = "MUSIKQUAD";
 
     let key = format!("{ENV_NAMESPACE}_{key}");
-    match std::env::var(&key) {
-        Ok(val) => return Ok(val),
-        Err(err) => {
-            use std::env::VarError;
-            match err {
-                VarError::NotPresent => {
-                    error!("Config option {key} was not set but is required");
-                }
-                VarError::NotUnicode(_) => {
-                    error!("Config option {key} was not unicode");
-                }
-            }
-            return Err(err.into());
-        }
-    }
+    std::env::var(&key).map_err(Into::into)
 }
 
 type Client = hyper::Client<HttpConnector, Body>;
