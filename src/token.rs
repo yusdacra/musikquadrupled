@@ -66,4 +66,8 @@ impl Tokens {
         let token_hash = hash_string(token.as_bytes())?;
         Ok(self.hashed.contains_async(&Cow::Owned(token_hash)).await)
     }
+
+    pub async fn revoke_all(&self) {
+        self.hashed.clear_async().await;
+    }
 }
