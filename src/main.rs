@@ -1,5 +1,6 @@
 use std::{net::SocketAddr, sync::Arc};
 
+use axum_server::tls_rustls::RustlsConfig;
 use dotenvy::Error as DotenvError;
 use error::AppError;
 use hyper::{client::HttpConnector, Body};
@@ -35,30 +36,32 @@ async fn app() -> Result<(), AppError> {
         Err(err) => return Err(err.into()),
     }
 
-    // let cert_path = get_conf("TLS_CERT_PATH");
-    // let key_path = get_conf("TLS_KEY_PATH");
-    // info!("cert path is: {cert_path}");
-    // info!("key path is: {key_path}");
-    // let config = RustlsConfig::from_pem_file(cert_path, key_path)
-    //     .await
-    //     .unwrap();
+    let cert_path = get_conf("TLS_CERT_PATH").ok();
+    let key_path = get_conf("TLS_KEY_PATH").ok();
 
-    let public_addr: SocketAddr = get_conf("ADDRESS")?.parse()?;
-    let local_addr: SocketAddr = get_conf("LOCAL_ADDRESS")?.parse()?;
+    let addr: SocketAddr = get_conf("ADDRESS")?.parse()?;
 
-    let state = AppState::new(AppStateInternal::new(public_addr.port()).await?);
-    let public = handler::public(state.clone()).await?;
-    let internal = handler::internal(state).await;
+    let state = AppState::new(AppStateInternal::new(addr.port()).await?);
+    let router = handler::handler(state).await?;
+    let make_service = router.into_make_service_with_connect_info::<SocketAddr>();
 
-    info!("listening on {public_addr} for public APIs, on {local_addr} for internal API use");
-    // axum_server::bind_rustls(addr, config)
-    let public = axum_server::bind(public_addr)
-        .serve(public.into_make_service_with_connect_info::<SocketAddr>());
-    let internal = axum_server::bind(local_addr).serve(internal.into_make_service());
+    let (task, scheme) = if let (Some(cert_path), Some(key_path)) = (cert_path, key_path) {
+        info!("cert path is: {cert_path}");
+        info!("key path is: {key_path}");
+        let config = RustlsConfig::from_pem_file(cert_path, key_path)
+            .await
+            .unwrap();
+        let task = tokio::spawn(axum_server::bind_rustls(addr, config).serve(make_service));
+        (task, "https")
+    } else {
+        let task = tokio::spawn(axum_server::bind(addr).serve(make_service));
+        (task, "http")
+    };
 
-    tokio::try_join!(public, internal)
-        .map(|_| ())
-        .map_err(Into::into)
+    info!("listening on {scheme}://{addr}");
+    task.await??;
+
+    Ok(())
 }
 
 fn get_conf(key: &str) -> Result<String, AppError> {

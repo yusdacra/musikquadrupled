@@ -36,11 +36,24 @@ use crate::{get_conf, AppState};
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
-pub(super) async fn public(state: AppState) -> Result<Router, AppError> {
+#[derive(Deserialize)]
+struct Auth {
+    #[serde(default)]
+    token: Option<String>,
+}
+
+fn extract_password_from_basic_auth(auth: &str) -> Result<String, AppError> {
+    let decoded = B64.decode(auth.trim_start_matches("Basic "))?;
+    let auth = String::from_utf8(decoded)?;
+    Ok(auth.trim_start_matches("default:").to_string())
+}
+
+pub(super) async fn handler(state: AppState) -> Result<Router, AppError> {
     let trace_layer =
         TraceLayer::new_for_http().make_span_with(DefaultMakeSpan::default().include_headers(true));
 
     let router = Router::new()
+        .route("/generate_token", get(generate_token))
         .route("/thumbnails/:id", get(http))
         .route("/audio/id/:id", get(http))
         .route("/", get(metadata_ws))
@@ -57,13 +70,16 @@ pub(super) async fn public(state: AppState) -> Result<Router, AppError> {
     Ok(router)
 }
 
-pub(super) async fn internal(state: AppState) -> Router {
-    Router::new()
-        .route("/generate_token", get(generate_token))
-        .with_state(state)
-}
+async fn generate_token(
+    State(app): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+) -> Result<axum::response::Response, AppError> {
+    // disallow any connections other than local ones
+    if !addr.ip().is_loopback() {
+        return Ok((StatusCode::FORBIDDEN, "not allowed").into_response());
+    }
 
-async fn generate_token(State(app): State<AppState>) -> Result<impl IntoResponse, AppError> {
+    // generate token
     let token = app.tokens.generate().await?;
     // start task to write tokens
     tokio::spawn(async move {
@@ -71,19 +87,7 @@ async fn generate_token(State(app): State<AppState>) -> Result<impl IntoResponse
             tracing::error!("couldn't write tokens file: {err}");
         }
     });
-    return Ok(token);
-}
-
-#[derive(Deserialize)]
-struct Auth {
-    #[serde(default)]
-    token: Option<String>,
-}
-
-fn extract_password_from_basic_auth(auth: &str) -> Result<String, AppError> {
-    let decoded = B64.decode(auth.trim_start_matches("Basic "))?;
-    let auth = String::from_utf8(decoded)?;
-    Ok(auth.trim_start_matches("default:").to_string())
+    return Ok(token.into_response());
 }
 
 async fn http(
@@ -186,7 +190,6 @@ async fn handle_metadata_socket(
     let (token, og_auth_msg) = 'ok: {
         'err: {
             if let Some(Ok(AxumMessage::Text(raw))) = client_socket.recv().await {
-                tracing::debug!("got client auth message: {raw}");
                 let Ok(parsed) = serde_json::from_str::<WsApiMessage>(&raw) else {
                     tracing::error!("invalid auth message");
                     break 'err;
@@ -253,7 +256,6 @@ async fn handle_metadata_socket(
                 },
             };
             let auth_msg_ser = serde_json::to_string(&auth_msg).expect("");
-            tracing::debug!("sending auth message to musikcubed: {auth_msg_ser}");
             if let Err(err) = server_socket
                 .send(TungsteniteMessage::Text(auth_msg_ser))
                 .await
@@ -263,7 +265,6 @@ async fn handle_metadata_socket(
             }
             // wait for auth reply
             if let Some(Ok(TungsteniteMessage::Text(raw))) = server_socket.next().await {
-                tracing::debug!("got auth reply from musikcubed: {raw}");
                 let Ok(parsed) = serde_json::from_str::<WsApiMessage>(&raw) else {
                     tracing::error!("invalid auth response message: {raw}");
                     break 'err;

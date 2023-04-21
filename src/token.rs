@@ -64,7 +64,6 @@ impl Tokens {
     pub async fn verify(&self, token: impl AsRef<str>) -> Result<bool, AppError> {
         let token = token.as_ref();
         let token_hash = hash_string(token.as_bytes())?;
-        tracing::debug!("verifying token {token}, hash {token_hash}");
         Ok(self.hashed.contains_async(&Cow::Owned(token_hash)).await)
     }
 }
