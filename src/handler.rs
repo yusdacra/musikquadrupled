@@ -138,7 +138,7 @@ pub(super) async fn handler(state: AppState) -> Result<Router, AppError> {
 
     let router = Router::new()
         .route("/thumbnail/:id", get(http))
-        .route("/audio/id/:id", get(http))
+        .route("/audio/external_id/:id", get(http))
         .route("/", get(metadata_ws))
         .layer(SetSensitiveRequestHeadersLayer::new([AUTHORIZATION]))
         .layer(trace_layer)
