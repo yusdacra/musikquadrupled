@@ -1,4 +1,4 @@
-use std::{fmt::Display, net::SocketAddr};
+use std::fmt::Display;
 
 use super::AppError;
 use async_tungstenite::{
@@ -9,7 +9,7 @@ use async_tungstenite::{
 use axum::{
     extract::{
         ws::{CloseFrame as AxumCloseFrame, Message as AxumMessage, WebSocket, WebSocketUpgrade},
-        ConnectInfo, Path, Query, State,
+        Path, Query, State,
     },
     headers::UserAgent,
     response::IntoResponse,
@@ -261,7 +261,6 @@ async fn http(
 async fn metadata_ws(
     State(app): State<AppState>,
     TypedHeader(user_agent): TypedHeader<UserAgent>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     ws: WebSocketUpgrade,
 ) -> Result<impl IntoResponse, AppError> {
     use async_tungstenite::tokio::connect_async;
@@ -276,14 +275,15 @@ async fn metadata_ws(
         .on_failed_upgrade({
             let user_agent = user_agent.clone();
             move |error| {
-                let _entered = tracing::info_span!("metadata ws http", client_addr = %addr, client_user_agent = %user_agent).entered();
+                let _entered =
+                    tracing::info_span!("metadata ws http", client_user_agent = %user_agent)
+                        .entered();
                 tracing::error!("failed to upgrade to websocket for client: {error}");
             }
         })
         .on_upgrade(move |socket| {
             let span = tracing::info_span!(
                 "metadata ws",
-                client_addr = %addr,
                 client_user_agent = %user_agent
             );
             handle_metadata_socket(ws_stream, socket, app).instrument(span)
