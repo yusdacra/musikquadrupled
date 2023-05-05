@@ -99,7 +99,7 @@ pub(super) async fn handler(state: AppState) -> Result<(Router, Router), AppErro
         .make_span_with(make_span_trace)
         .on_request(|req: &Request<Body>, _span: &Span| {
             tracing::debug!(
-                "started processing request with headers: {:#?}",
+                "started processing request with headers: {:?}",
                 req.headers()
             )
         });
