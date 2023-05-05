@@ -19,8 +19,8 @@ use axum::{
 use base64::Engine;
 use futures::{SinkExt, StreamExt};
 use http::{
-    header::{AUTHORIZATION, CONTENT_TYPE},
-    Method, Request, Response, StatusCode,
+    header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE},
+    HeaderValue, Method, Request, Response, StatusCode,
 };
 use hyper::Body;
 use serde::{Deserialize, Serialize};
@@ -32,6 +32,8 @@ use tower_http::{
 use tracing::{Instrument, Span};
 
 use crate::{AppState, B64};
+
+const AUDIO_CACHE_HEADER: HeaderValue = HeaderValue::from_static("private, max-age=604800");
 
 #[derive(Deserialize)]
 struct Auth {
@@ -124,7 +126,7 @@ pub(super) async fn handler(state: AppState) -> Result<(Router, Router), AppErro
     let router = Router::new()
         .route("/token/generate_for_music/:id", get(generate_scoped_token))
         .route("/thumbnail/:id", get(http))
-        .route("/audio/external_id/:id", get(http))
+        .route("/audio/external_id/:id", get(get_music))
         .route("/audio/scoped/:id", get(get_scoped_music))
         .route("/", get(metadata_ws))
         .layer(SetSensitiveRequestHeadersLayer::new([AUTHORIZATION]))
@@ -170,12 +172,13 @@ async fn generate_scoped_token(
     let maybe_token = query.token;
 
     'ok: {
-        tracing::debug!("verifying token: {maybe_token:?}");
         if let Some(token) = maybe_token {
             if app.tokens.verify(token).await? {
+                tracing::debug!("verified token");
                 break 'ok;
             }
         }
+        tracing::debug!("invalid token");
         return Ok((
             StatusCode::UNAUTHORIZED,
             "Invalid token or token not present",
@@ -193,7 +196,7 @@ async fn get_scoped_music(
     Path(token): Path<String>,
 ) -> Result<Response<Body>, AppError> {
     if let Some(music_id) = app.scoped_tokens.verify(token).await {
-        Ok(app
+        let mut resp = app
             .client
             .request(
                 Request::builder()
@@ -205,13 +208,30 @@ async fn get_scoped_music(
                     .body(Body::empty())
                     .expect("cant fail"),
             )
-            .await?)
+            .await?;
+        // add cache header
+        resp.headers_mut()
+            .insert(CACHE_CONTROL, AUDIO_CACHE_HEADER.clone());
+        Ok(resp)
     } else {
         Ok(Response::builder()
             .status(StatusCode::UNAUTHORIZED)
             .body("Invalid scoped token".to_string().into())
             .expect("cant fail"))
     }
+}
+
+async fn get_music(
+    State(app): State<AppState>,
+    Query(query): Query<Auth>,
+    req: Request<Body>,
+) -> Result<Response<Body>, AppError> {
+    http(State(app), Query(query), req).await.map(|mut resp| {
+        // add cache header
+        resp.headers_mut()
+            .insert(CACHE_CONTROL, AUDIO_CACHE_HEADER.clone());
+        resp
+    })
 }
 
 async fn http(
@@ -240,12 +260,13 @@ async fn http(
     });
 
     'ok: {
-        tracing::debug!("verifying token: {maybe_token:?}");
         if let Some(token) = maybe_token {
             if app.tokens.verify(token).await? {
+                tracing::debug!("verified token");
                 break 'ok;
             }
         }
+        tracing::debug!("invalid token");
         return Ok(Response::builder()
             .status(StatusCode::UNAUTHORIZED)
             .body("Invalid token or token not present".to_string().into())
