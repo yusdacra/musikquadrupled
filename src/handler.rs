@@ -9,7 +9,7 @@ use async_tungstenite::{
 use axum::{
     extract::{
         ws::{CloseFrame as AxumCloseFrame, Message as AxumMessage, WebSocket, WebSocketUpgrade},
-        ConnectInfo, Query, State,
+        ConnectInfo, Path, Query, State,
     },
     headers::UserAgent,
     middleware::Next,
@@ -32,9 +32,7 @@ use tower_http::{
 };
 use tracing::{Instrument, Span};
 
-use crate::{get_conf, AppState};
-
-const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
+use crate::{get_conf, AppState, B64};
 
 #[derive(Deserialize)]
 struct Auth {
@@ -137,8 +135,10 @@ pub(super) async fn handler(state: AppState) -> Result<Router, AppError> {
         .layer(axum::middleware::from_fn(block_external_ips));
 
     let router = Router::new()
+        .route("/token/generate_for_music/:id", get(generate_scoped_token))
         .route("/thumbnail/:id", get(http))
         .route("/audio/external_id/:id", get(http))
+        .route("/audio/scoped/:id", get(get_scoped_music))
         .route("/", get(metadata_ws))
         .layer(SetSensitiveRequestHeadersLayer::new([AUTHORIZATION]))
         .layer(trace_layer)
@@ -172,6 +172,58 @@ async fn generate_token(State(app): State<AppState>) -> Result<axum::response::R
         }
     });
     Ok(token.into_response())
+}
+
+async fn generate_scoped_token(
+    State(app): State<AppState>,
+    Query(query): Query<Auth>,
+    Path(music_id): Path<String>,
+) -> Result<axum::response::Response, AppError> {
+    let maybe_token = query.token;
+
+    'ok: {
+        tracing::debug!("verifying token: {maybe_token:?}");
+        if let Some(token) = maybe_token {
+            if app.tokens.verify(token).await? {
+                break 'ok;
+            }
+        }
+        return Ok((
+            StatusCode::UNAUTHORIZED,
+            "Invalid token or token not present",
+        )
+            .into_response());
+    }
+
+    // generate token
+    let token = app.scoped_tokens.generate_for_id(music_id).await;
+    Ok(token.into_response())
+}
+
+async fn get_scoped_music(
+    State(app): State<AppState>,
+    Path(token): Path<String>,
+) -> Result<Response<Body>, AppError> {
+    if let Some(music_id) = app.scoped_tokens.verify(token).await {
+        Ok(app
+            .client
+            .request(
+                Request::builder()
+                    .uri(format!(
+                        "http://{}:{}/audio/external_id/{}",
+                        app.musikcubed_address, app.musikcubed_http_port, music_id
+                    ))
+                    .header(AUTHORIZATION, app.musikcubed_auth_header_value.clone())
+                    .body(Body::empty())
+                    .expect("cant fail"),
+            )
+            .await?)
+    } else {
+        Ok(Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .body("Invalid scoped token".to_string().into())
+            .expect("cant fail"))
+    }
 }
 
 async fn http(
@@ -212,11 +264,8 @@ async fn http(
             .expect("cant fail"));
     }
 
-    let auth = B64.encode(format!("default:{}", app.musikcubed_password));
-    req.headers_mut().insert(
-        AUTHORIZATION,
-        format!("Basic {auth}").parse().expect("valid header value"),
-    );
+    req.headers_mut()
+        .insert(AUTHORIZATION, app.musikcubed_auth_header_value.clone());
 
     Ok(app.client.request(req).await?)
 }

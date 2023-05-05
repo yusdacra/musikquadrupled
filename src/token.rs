@@ -1,14 +1,27 @@
 use rand::Rng;
-use scc::HashSet;
+use scc::{HashMap, HashSet};
 use std::borrow::Cow;
 use std::fmt::Write;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::UNIX_EPOCH;
 
 use crate::error::AppError;
 
+fn get_current_time() -> u64 {
+    UNIX_EPOCH.elapsed().unwrap().as_secs()
+}
+
 fn hash_string(data: &[u8]) -> Result<String, argon2::Error> {
     argon2::hash_encoded(data, "11111111".as_bytes(), &argon2::Config::default())
+}
+
+fn generate_random_string(len: usize) -> String {
+    rand::thread_rng()
+        .sample_iter(rand::distributions::Alphanumeric)
+        .take(len)
+        .map(|c| c as char)
+        .collect::<String>()
 }
 
 #[derive(Debug, Clone)]
@@ -49,11 +62,7 @@ impl Tokens {
     }
 
     pub async fn generate(&self) -> Result<String, AppError> {
-        let token = rand::thread_rng()
-            .sample_iter(rand::distributions::Alphanumeric)
-            .take(30)
-            .map(|c| c as char)
-            .collect::<String>();
+        let token = generate_random_string(30);
 
         let token_hash = hash_string(token.as_bytes())?;
 
@@ -70,4 +79,46 @@ impl Tokens {
     pub async fn revoke_all(&self) {
         self.hashed.clear_async().await;
     }
+}
+
+#[derive(Clone)]
+pub(crate) struct MusicScopedTokens {
+    map: Arc<HashMap<String, MusicScopedToken>>,
+    expiry_time: u64,
+}
+
+impl MusicScopedTokens {
+    pub fn new(expiry_time: u64) -> Self {
+        Self {
+            map: Arc::new(HashMap::new()),
+            expiry_time,
+        }
+    }
+
+    pub async fn generate_for_id(&self, music_id: String) -> String {
+        let data = MusicScopedToken {
+            creation: get_current_time(),
+            music_id,
+        };
+        let token = generate_random_string(12);
+
+        let _ = self.map.insert_async(token.clone(), data).await;
+        return token;
+    }
+
+    pub async fn verify(&self, token: impl AsRef<str>) -> Option<String> {
+        let token = token.as_ref();
+        let data = self.map.read_async(token, |_, v| v.clone()).await?;
+        if get_current_time() - data.creation > self.expiry_time {
+            self.map.remove_async(token).await;
+            return None;
+        }
+        Some(data.music_id)
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct MusicScopedToken {
+    creation: u64,
+    music_id: String,
 }

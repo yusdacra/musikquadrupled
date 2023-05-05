@@ -1,10 +1,11 @@
 use std::{net::SocketAddr, process::ExitCode, sync::Arc};
 
 use axum_server::tls_rustls::RustlsConfig;
+use base64::Engine;
 use dotenvy::Error as DotenvError;
 use error::AppError;
 use hyper::{client::HttpConnector, Body};
-use token::Tokens;
+use token::{MusicScopedTokens, Tokens};
 use tracing::{info, warn};
 use tracing_subscriber::prelude::*;
 
@@ -82,29 +83,41 @@ type Client = hyper::Client<HttpConnector, Body>;
 
 type AppState = Arc<AppStateInternal>;
 
+const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
+
 #[derive(Clone)]
 struct AppStateInternal {
     client: Client,
     tokens: Tokens,
+    scoped_tokens: MusicScopedTokens,
     tokens_path: String,
     public_port: u16,
     musikcubed_address: String,
     musikcubed_http_port: u16,
     musikcubed_metadata_port: u16,
     musikcubed_password: String,
+    musikcubed_auth_header_value: http::HeaderValue,
 }
 
 impl AppStateInternal {
     async fn new(public_port: u16) -> Result<Self, AppError> {
+        let musikcubed_password = get_conf("MUSIKCUBED_PASSWORD")?;
         let tokens_path = get_conf("TOKENS_FILE")?;
         let this = Self {
             public_port,
             musikcubed_address: get_conf("MUSIKCUBED_ADDRESS")?,
             musikcubed_http_port: get_conf("MUSIKCUBED_HTTP_PORT")?.parse()?,
             musikcubed_metadata_port: get_conf("MUSIKCUBED_METADATA_PORT")?.parse()?,
-            musikcubed_password: get_conf("MUSIKCUBED_PASSWORD")?,
+            musikcubed_auth_header_value: format!(
+                "Basic {}",
+                B64.encode(format!("default:{}", musikcubed_password))
+            )
+            .parse()
+            .expect("valid header value"),
+            musikcubed_password,
             client: Client::new(),
             tokens: Tokens::read(&tokens_path).await?,
+            scoped_tokens: MusicScopedTokens::new(get_conf("SCOPED_EXPIRY_DURATION")?.parse()?),
             tokens_path,
         };
         Ok(this)
