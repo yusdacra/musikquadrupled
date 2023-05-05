@@ -115,15 +115,15 @@ pub(super) async fn handler(state: AppState) -> Result<(Router, Router), AppErro
         .route("/audio/external_id/:id", get(get_music))
         .route("/audio/scoped/:id", get(get_scoped_music))
         .route("/", get(metadata_ws))
-        .layer(SetRequestIdLayer::new(REQUEST_ID.clone(), MakeRequestUuid))
-        .layer(SetSensitiveRequestHeadersLayer::new([AUTHORIZATION]))
         .layer(trace_layer)
+        .layer(SetSensitiveRequestHeadersLayer::new([AUTHORIZATION]))
         .layer(
             CorsLayer::new()
                 .allow_origin(tower_http::cors::Any)
                 .allow_headers([CONTENT_TYPE, CACHE_CONTROL, REQUEST_ID])
                 .allow_methods([Method::GET]),
         )
+        .layer(SetRequestIdLayer::new(REQUEST_ID.clone(), MakeRequestUuid))
         .with_state(state);
 
     Ok((router, internal_router))
