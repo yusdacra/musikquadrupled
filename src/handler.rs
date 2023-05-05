@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt::Display};
+use std::{borrow::Cow, collections::HashMap, fmt::Display};
 
 use super::AppError;
 use async_tungstenite::{
@@ -52,7 +52,7 @@ fn extract_password_from_basic_auth(auth: &str) -> Result<String, AppError> {
 }
 
 struct QueryDisplay<'a, 'b> {
-    map: HashMap<&'a str, &'b str>,
+    map: HashMap<Cow<'a, str>, Cow<'b, str>>,
 }
 
 impl<'a, 'b> Display for QueryDisplay<'a, 'b> {
@@ -60,7 +60,7 @@ impl<'a, 'b> Display for QueryDisplay<'a, 'b> {
         let length = self.map.len();
         for (index, (k, v)) in self.map.iter().enumerate() {
             write!(f, "{k}={v}")?;
-            if index != length {
+            if index < length - 1 {
                 write!(f, "&")?;
             }
         }
@@ -71,12 +71,11 @@ impl<'a, 'b> Display for QueryDisplay<'a, 'b> {
 fn make_span_trace<B>(req: &Request<B>) -> Span {
     let query = req.uri().query();
     let mut query_map = query
-        .and_then(|v| serde_qs::from_str::<HashMap<&str, &str>>(v).ok())
+        .and_then(|v| serde_qs::from_str::<HashMap<Cow<str>, Cow<str>>>(v).ok())
         .unwrap_or_else(HashMap::new);
     if query_map.contains_key("token") {
-        query_map.insert("token", "<redacted>");
+        query_map.insert(Cow::Borrowed("token"), Cow::Borrowed("<redacted>"));
     }
-    let query_display = QueryDisplay { map: query_map };
 
     let request_id = req
         .headers()
@@ -84,14 +83,25 @@ fn make_span_trace<B>(req: &Request<B>) -> Span {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("no id set");
 
-    tracing::debug_span!(
-        "request",
-        method = %req.method(),
-        path = %req.uri().path(),
-        query = %query_display,
-        version = ?req.version(),
-        id = %request_id,
-    )
+    if query_map.is_empty() {
+        tracing::debug_span!(
+            "request",
+            method = %req.method(),
+            path = %req.uri().path(),
+            version = ?req.version(),
+            id = %request_id,
+        )
+    } else {
+        let query_display = QueryDisplay { map: query_map };
+        tracing::debug_span!(
+            "request",
+            method = %req.method(),
+            path = %req.uri().path(),
+            query = %query_display,
+            version = ?req.version(),
+            id = %request_id,
+        )
+    }
 }
 
 pub(super) async fn handler(state: AppState) -> Result<(Router, Router), AppError> {
