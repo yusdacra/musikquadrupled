@@ -20,20 +20,24 @@ use base64::Engine;
 use futures::{SinkExt, StreamExt};
 use http::{
     header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE},
-    HeaderValue, Method, Request, Response, StatusCode,
+    HeaderName, HeaderValue, Method, Request, Response, StatusCode,
 };
 use hyper::Body;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::net::TcpStream;
 use tower_http::{
-    cors::CorsLayer, sensitive_headers::SetSensitiveRequestHeadersLayer, trace::TraceLayer,
+    cors::CorsLayer,
+    request_id::{MakeRequestUuid, SetRequestIdLayer},
+    sensitive_headers::SetSensitiveRequestHeadersLayer,
+    trace::TraceLayer,
 };
 use tracing::{Instrument, Span};
 
 use crate::{AppState, B64};
 
 const AUDIO_CACHE_HEADER: HeaderValue = HeaderValue::from_static("private, max-age=604800");
+const REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
 
 #[derive(Deserialize)]
 struct Auth {
@@ -73,18 +77,32 @@ fn make_span_trace<B>(req: &Request<B>) -> Span {
         query_map.insert("token", "<redacted>");
     }
     let query_display = QueryDisplay { map: query_map };
+
+    let request_id = req
+        .headers()
+        .get(REQUEST_ID)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("no id set");
+
     tracing::debug_span!(
         "request",
         method = %req.method(),
         path = %req.uri().path(),
         query = %query_display,
         version = ?req.version(),
-        headers = ?req.headers(),
+        id = %request_id,
     )
 }
 
 pub(super) async fn handler(state: AppState) -> Result<(Router, Router), AppError> {
-    let trace_layer = TraceLayer::new_for_http().make_span_with(make_span_trace);
+    let trace_layer = TraceLayer::new_for_http()
+        .make_span_with(make_span_trace)
+        .on_request(|req: &Request<Body>, _span: &Span| {
+            tracing::debug!(
+                "started processing request with headers: {:#?}",
+                req.headers()
+            )
+        });
 
     let internal_router = Router::new()
         .route("/token/generate", get(generate_token))
@@ -97,12 +115,13 @@ pub(super) async fn handler(state: AppState) -> Result<(Router, Router), AppErro
         .route("/audio/external_id/:id", get(get_music))
         .route("/audio/scoped/:id", get(get_scoped_music))
         .route("/", get(metadata_ws))
+        .layer(SetRequestIdLayer::new(REQUEST_ID.clone(), MakeRequestUuid))
         .layer(SetSensitiveRequestHeadersLayer::new([AUTHORIZATION]))
         .layer(trace_layer)
         .layer(
             CorsLayer::new()
                 .allow_origin(tower_http::cors::Any)
-                .allow_headers([CONTENT_TYPE])
+                .allow_headers([CONTENT_TYPE, CACHE_CONTROL, REQUEST_ID])
                 .allow_methods([Method::GET]),
         )
         .with_state(state);
