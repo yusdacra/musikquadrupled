@@ -73,9 +73,7 @@ fn make_span_trace<B>(req: &Request<B>) -> Span {
     let mut query_map = query
         .and_then(|v| serde_qs::from_str::<HashMap<Cow<str>, Cow<str>>>(v).ok())
         .unwrap_or_else(HashMap::new);
-    if query_map.contains_key("token") {
-        query_map.insert(Cow::Borrowed("token"), Cow::Borrowed("<redacted>"));
-    }
+    query_map.remove("token");
 
     let request_id = req
         .headers()
@@ -86,19 +84,15 @@ fn make_span_trace<B>(req: &Request<B>) -> Span {
     if query_map.is_empty() {
         tracing::debug_span!(
             "request",
-            method = %req.method(),
             path = %req.uri().path(),
-            version = ?req.version(),
             id = %request_id,
         )
     } else {
         let query_display = QueryDisplay { map: query_map };
         tracing::debug_span!(
             "request",
-            method = %req.method(),
             path = %req.uri().path(),
             query = %query_display,
-            version = ?req.version(),
             id = %request_id,
         )
     }
@@ -109,8 +103,9 @@ pub(super) async fn handler(state: AppState) -> Result<(Router, Router), AppErro
         .make_span_with(make_span_trace)
         .on_request(|req: &Request<Body>, _span: &Span| {
             tracing::debug!(
-                "started processing request with headers: {:?}",
-                req.headers()
+                "started processing request {} on {:?}",
+                req.method(),
+                req.version(),
             )
         });
 
