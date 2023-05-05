@@ -12,7 +12,6 @@ use axum::{
         ConnectInfo, Path, Query, State,
     },
     headers::UserAgent,
-    middleware::Next,
     response::IntoResponse,
     routing::{get, post},
     Router, TypedHeader,
@@ -44,18 +43,6 @@ fn extract_password_from_basic_auth(auth: &str) -> Result<String, AppError> {
     let decoded = B64.decode(auth.trim_start_matches("Basic "))?;
     let auth = String::from_utf8(decoded)?;
     Ok(auth.trim_start_matches("default:").to_string())
-}
-
-async fn block_external_ips<B>(
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    req: Request<B>,
-    next: Next<B>,
-) -> Result<impl IntoResponse, impl IntoResponse> {
-    if addr.ip().is_loopback() {
-        Ok(next.run(req).await)
-    } else {
-        Err((StatusCode::FORBIDDEN, "not allowed"))
-    }
 }
 
 struct ComponentDisplay<Left, Right> {
@@ -126,13 +113,13 @@ fn make_span_trace<B>(req: &Request<B>) -> Span {
     )
 }
 
-pub(super) async fn handler(state: AppState) -> Result<Router, AppError> {
+pub(super) async fn handler(state: AppState) -> Result<(Router, Router), AppError> {
     let trace_layer = TraceLayer::new_for_http().make_span_with(make_span_trace);
 
     let internal_router = Router::new()
         .route("/token/generate", get(generate_token))
         .route("/token/revoke_all", post(revoke_all_tokens))
-        .layer(axum::middleware::from_fn(block_external_ips));
+        .with_state(state.clone());
 
     let router = Router::new()
         .route("/token/generate_for_music/:id", get(generate_scoped_token))
@@ -147,9 +134,10 @@ pub(super) async fn handler(state: AppState) -> Result<Router, AppError> {
                 .allow_origin(tower_http::cors::Any)
                 .allow_headers([CONTENT_TYPE])
                 .allow_methods([Method::GET]),
-        );
+        )
+        .with_state(state);
 
-    Ok(router.merge(internal_router).with_state(state))
+    Ok((router, internal_router))
 }
 
 async fn revoke_all_tokens(State(app): State<AppState>) -> impl IntoResponse {
