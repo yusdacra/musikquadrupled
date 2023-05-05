@@ -21,7 +21,7 @@ use base64::Engine;
 use futures::{SinkExt, StreamExt};
 use http::{
     header::{AUTHORIZATION, CONTENT_TYPE},
-    HeaderValue, Method, Request, Response, StatusCode,
+    Method, Request, Response, StatusCode,
 };
 use hyper::Body;
 use serde::{Deserialize, Serialize};
@@ -32,7 +32,7 @@ use tower_http::{
 };
 use tracing::{Instrument, Span};
 
-use crate::{get_conf, AppState, B64};
+use crate::{AppState, B64};
 
 #[derive(Deserialize)]
 struct Auth {
@@ -144,7 +144,7 @@ pub(super) async fn handler(state: AppState) -> Result<Router, AppError> {
         .layer(trace_layer)
         .layer(
             CorsLayer::new()
-                .allow_origin(get_conf("CORS_ALLOW_ORIGIN")?.parse::<HeaderValue>()?)
+                .allow_origin(tower_http::cors::Any)
                 .allow_headers([CONTENT_TYPE])
                 .allow_methods([Method::GET]),
         );
