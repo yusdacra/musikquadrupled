@@ -122,12 +122,16 @@ impl AppStateInternal {
             musikcubed_address: get_conf("MUSIKCUBED_ADDRESS")?,
             musikcubed_http_port: get_conf("MUSIKCUBED_HTTP_PORT")?.parse()?,
             musikcubed_metadata_port: get_conf("MUSIKCUBED_METADATA_PORT")?.parse()?,
-            musikcubed_auth_header_value: format!(
-                "Basic {}",
-                B64.encode(format!("default:{}", musikcubed_password))
-            )
-            .parse()
-            .expect("valid header value"),
+            musikcubed_auth_header_value: {
+                let mut val: http::HeaderValue = format!(
+                    "Basic {}",
+                    B64.encode(format!("default:{}", musikcubed_password))
+                )
+                .parse()
+                .expect("valid header value");
+                val.set_sensitive(true);
+                val
+            },
             musikcubed_password,
             client: Client::new(),
             tokens: Tokens::read(&tokens_path).await?,
