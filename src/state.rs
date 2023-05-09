@@ -107,7 +107,7 @@ impl AppStateInternal {
         mut req: http::Request<hyper::Body>,
     ) -> Result<http::Response<hyper::Body>, AppError> {
         *req.uri_mut() = format!(
-            "http://{}:{}/{}",
+            "http://{}:{}{}",
             self.musikcubed_address,
             self.musikcubed_http_port,
             path.as_ref()

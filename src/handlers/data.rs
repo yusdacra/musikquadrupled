@@ -59,7 +59,7 @@ pub(crate) async fn http(
         "proxying request to {}:{} with headers {:?}",
         app.musikcubed_address,
         app.musikcubed_http_port,
-        req.headers()
+        request.headers()
     );
 
     app.make_musikcubed_request(format!("{path}{query_prefix}{query}"), request)

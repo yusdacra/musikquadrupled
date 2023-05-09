@@ -44,7 +44,7 @@ pub(crate) async fn get_scoped_music_thumbnail(
         return Err("music id not found".into());
     };
     app.make_musikcubed_request(
-        format!("thumbnail/{}", info.thumbnail_id),
+        format!("/thumbnail/{}", info.thumbnail_id),
         Request::new(Body::empty()),
     )
     .await
@@ -62,7 +62,7 @@ pub(crate) async fn get_scoped_music_file(
         req.headers_mut().insert(RANGE, range);
     }
     let mut resp = app
-        .make_musikcubed_request(format!("audio/external_id/{music_id}"), req)
+        .make_musikcubed_request(format!("/audio/external_id/{music_id}"), req)
         .await?;
     if resp.status().is_success() {
         // add cache header
