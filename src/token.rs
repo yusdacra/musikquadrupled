@@ -32,9 +32,12 @@ pub(crate) struct Tokens {
 
 impl Tokens {
     pub async fn read(path: impl AsRef<Path>) -> Result<Self, AppError> {
+        let tokens = tokio::fs::read_to_string(path).await?;
         let this = Self {
             hashed: Arc::new(HashSet::new()),
-            raw_contents: Box::leak(tokio::fs::read_to_string(path).await?.into_boxed_str()),
+            // this is okay since we only call this once and it will be
+            // used for all of it's lifetime
+            raw_contents: Box::leak(tokens.into_boxed_str()),
         };
 
         for token in this.raw_contents.lines() {
@@ -118,7 +121,7 @@ impl MusicScopedTokens {
 }
 
 #[derive(Clone)]
-pub(crate) struct MusicScopedToken {
+struct MusicScopedToken {
     creation: u64,
     music_id: String,
 }
