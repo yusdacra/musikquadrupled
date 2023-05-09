@@ -18,7 +18,7 @@ use base64::Engine;
 use futures::{SinkExt, StreamExt};
 use http::{
     header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, RANGE},
-    HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode,
+    HeaderName, HeaderValue, Method, Request, Response, StatusCode,
 };
 use hyper::Body;
 use serde::Deserialize;
@@ -179,16 +179,11 @@ async fn get_scoped_music_thumbnail(
     let Some(info) = app.music_info.get(music_id).await else {
         return Err("music id not found".into());
     };
-    let req = Request::builder()
-        .uri(format!(
-            "http://{}:{}/thumbnail/{}",
-            app.musikcubed_address, app.musikcubed_http_port, info.thumbnail_id
-        ))
-        .header(AUTHORIZATION, app.musikcubed_auth_header_value.clone())
-        .body(Body::empty())
-        .expect("cant fail");
-    let resp = app.client.request(req).await?;
-    Ok(resp)
+    app.make_musikcubed_request(
+        format!("thumbnail/{}", info.thumbnail_id),
+        Request::new(Body::empty()),
+    )
+    .await
 }
 
 async fn get_scoped_music_file(
@@ -197,19 +192,14 @@ async fn get_scoped_music_file(
     request: Request<Body>,
 ) -> Result<Response<Body>, AppError> {
     let music_id = app.verify_scoped_token(token).await?;
-    let mut req = Request::builder()
-        .uri(format!(
-            "http://{}:{}/audio/external_id/{}",
-            app.musikcubed_address, app.musikcubed_http_port, music_id
-        ))
-        .header(AUTHORIZATION, app.musikcubed_auth_header_value.clone())
-        .body(Body::empty())
-        .expect("cant fail");
+    let mut req = Request::new(Body::empty());
     // proxy any range headers
     if let Some(range) = request.headers().get(RANGE).cloned() {
         req.headers_mut().insert(RANGE, range);
     }
-    let mut resp = app.client.request(req).await?;
+    let mut resp = app
+        .make_musikcubed_request(format!("audio/external_id/{music_id}"), req)
+        .await?;
     if resp.status().is_success() {
         // add cache header
         resp.headers_mut()
@@ -236,8 +226,16 @@ async fn get_music(
 async fn http(
     State(app): State<AppState>,
     Query(auth): Query<Auth>,
-    mut req: Request<Body>,
+    req: Request<Body>,
 ) -> Result<Response<Body>, AppError> {
+    let maybe_token = auth.token.or_else(|| {
+        req.headers()
+            .get(AUTHORIZATION)
+            .and_then(|h| h.to_str().ok())
+            .and_then(|auth| extract_password_from_basic_auth(auth).ok())
+    });
+    app.verify_token(maybe_token).await?;
+
     // remove token from query
     let path = req.uri().path();
     let query_map = remove_token_from_query(req.uri().query());
@@ -247,47 +245,20 @@ async fn http(
         .unwrap_or_else(String::new);
     let query_prefix = has_query.then_some("?").unwrap_or("");
 
-    // craft new url
-    *req.uri_mut() = format!(
-        "http://{}:{}{path}{query_prefix}{query}",
-        app.musikcubed_address, app.musikcubed_http_port
-    )
-    .parse()?;
+    let mut request = Request::new(Body::empty());
+    if let Some(range) = req.headers().get(RANGE).cloned() {
+        request.headers_mut().insert(RANGE, range);
+    }
 
-    let maybe_token = auth.token.or_else(|| {
-        req.headers()
-            .get(AUTHORIZATION)
-            .and_then(|h| h.to_str().ok())
-            .and_then(|auth| extract_password_from_basic_auth(auth).ok())
-    });
-
-    app.verify_token(maybe_token).await?;
-
-    // proxy only the headers we need
-    let headers = {
-        let mut headers = HeaderMap::with_capacity(2);
-        let mut proxy_header = |header_name: HeaderName| {
-            if let Some(value) = req.headers().get(&header_name).cloned() {
-                headers.insert(header_name, value);
-            }
-        };
-        // proxy range header
-        proxy_header(RANGE);
-        // add auth
-        headers.insert(AUTHORIZATION, app.musikcubed_auth_header_value.clone());
-        headers
-    };
-
-    *req.headers_mut() = headers;
-
-    let scheme = req.uri().scheme_str().unwrap();
-    let authority = req.uri().authority().unwrap().as_str();
     tracing::debug!(
-        "proxying request to {scheme}://{authority} with headers {:?}",
+        "proxying request to {}:{} with headers {:?}",
+        app.musikcubed_address,
+        app.musikcubed_http_port,
         req.headers()
     );
 
-    Ok(app.client.request(req).await?)
+    app.make_musikcubed_request(format!("{path}{query_prefix}{query}"), request)
+        .await
 }
 
 async fn metadata_ws(

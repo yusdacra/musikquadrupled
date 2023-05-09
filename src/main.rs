@@ -186,6 +186,26 @@ impl AppStateInternal {
         Err(AppError::from("Invalid token or token not present")
             .status(http::StatusCode::UNAUTHORIZED))
     }
+
+    async fn make_musikcubed_request(
+        &self,
+        path: impl AsRef<str>,
+        mut req: http::Request<hyper::Body>,
+    ) -> Result<http::Response<hyper::Body>, AppError> {
+        *req.uri_mut() = format!(
+            "http://{}:{}/{}",
+            self.musikcubed_address,
+            self.musikcubed_http_port,
+            path.as_ref()
+        )
+        .parse()?;
+        req.headers_mut().insert(
+            http::header::AUTHORIZATION,
+            self.musikcubed_auth_header_value.clone(),
+        );
+        let resp = self.client.request(req).await?;
+        Ok(resp)
+    }
 }
 
 #[derive(Clone, Deserialize, Serialize)]
