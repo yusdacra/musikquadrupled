@@ -2,7 +2,13 @@
 
 A proxy server for musikcubed that implements TLS, alternative authentication solution and CORS for proper Web support. Compatible with musikcube.
 
-# API (public)
+### Configuration
+
+The configuration is done via `MUSIKQUAD_*` environment variables. Alternatively you can also provide a `.env` file in the same directory as the binary or a parent directory, which will be readed and loaded as environment variables.
+
+See `.env.example` for a commented `.env` file.
+
+### API (public)
 
 All of the `musikcubed` APIs are implemented. On top of those:
 
@@ -11,7 +17,7 @@ All of the `musikcubed` APIs are implemented. On top of those:
 - `share/info/:scoped_token`: Returns information (title, album, artist etc.) of the music corresponding to the specified `scoped_token` in JSON. Returns `404 Not Found` if the requested music isn't available.
 - `share/thumbnail/:scoped_token`: Returns the thumbnail for the music corresponding to the specified `scoped_token`. Returns `404 Not Found` if the requested thumbnail isn't available.
 
-# API (internal)
+### API (internal)
 
 These are only exposed to `localhost` clients.
 
