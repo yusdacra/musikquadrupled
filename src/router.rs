@@ -18,8 +18,8 @@ use tracing::Span;
 
 use crate::{
     handlers,
+    state::AppState,
     utils::{remove_token_from_query, QueryDisplay},
-    AppState,
 };
 
 const REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");

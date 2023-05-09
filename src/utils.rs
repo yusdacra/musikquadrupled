@@ -10,7 +10,9 @@ use axum::{
 };
 use base64::Engine;
 
-use crate::{error::AppError, B64};
+use crate::error::AppError;
+
+pub(crate) const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
 #[derive(Debug)]
 pub(crate) enum WsError {
@@ -212,4 +214,11 @@ pub(crate) fn remove_token_from_query(query: Option<&str>) -> HashMap<String, St
         .unwrap_or_else(HashMap::new);
     query_map.remove("token");
     query_map
+}
+
+pub(crate) fn get_conf(key: &str) -> Result<String, AppError> {
+    const ENV_NAMESPACE: &str = "MUSIKQUAD";
+
+    let key = format!("{ENV_NAMESPACE}_{key}");
+    std::env::var(&key).map_err(Into::into)
 }
