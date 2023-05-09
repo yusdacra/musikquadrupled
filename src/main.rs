@@ -20,7 +20,8 @@ use crate::{
 
 mod api;
 mod error;
-mod handler;
+mod handlers;
+mod router;
 mod token;
 mod utils;
 
@@ -60,7 +61,7 @@ async fn app() -> Result<(), AppError> {
     let internal_port: u16 = get_conf("INTERNAL_PORT")?.parse()?;
 
     let state = AppState::new(AppStateInternal::new(public_port).await?);
-    let (public_router, internal_router) = handler::handler(state).await?;
+    let (public_router, internal_router) = router::handler(state).await?;
 
     let internal_make_service = internal_router.into_make_service();
     let internal_task = tokio::spawn(

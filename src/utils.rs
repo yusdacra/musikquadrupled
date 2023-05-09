@@ -8,6 +8,9 @@ use axum::{
     extract::ws::{CloseFrame as AxumCloseFrame, Message as AxumMessage},
     Error as AxumError,
 };
+use base64::Engine;
+
+use crate::{error::AppError, B64};
 
 #[derive(Debug)]
 pub(crate) enum WsError {
@@ -195,4 +198,18 @@ impl Display for QueryDisplay {
         }
         Ok(())
     }
+}
+
+pub(crate) fn extract_password_from_basic_auth(auth: &str) -> Result<String, AppError> {
+    let decoded = B64.decode(auth.trim_start_matches("Basic "))?;
+    let auth = String::from_utf8(decoded)?;
+    Ok(auth.trim_start_matches("default:").to_string())
+}
+
+pub(crate) fn remove_token_from_query(query: Option<&str>) -> HashMap<String, String> {
+    let mut query_map: HashMap<String, String> = query
+        .and_then(|v| serde_qs::from_str(v).ok())
+        .unwrap_or_else(HashMap::new);
+    query_map.remove("token");
+    query_map
 }

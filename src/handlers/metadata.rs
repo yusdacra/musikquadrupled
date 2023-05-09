@@ -1,267 +1,28 @@
-use std::collections::HashMap;
-
-use super::AppError;
 use async_tungstenite::{
     tokio::TokioAdapter, tungstenite::Message as TungsteniteMessage, WebSocketStream,
 };
 use axum::{
     extract::{
-        ws::{Message as AxumMessage, WebSocket, WebSocketUpgrade},
-        Path, Query, State,
+        ws::{Message as AxumMessage, WebSocket},
+        State, WebSocketUpgrade,
     },
     headers::UserAgent,
     response::IntoResponse,
-    routing::{get, post},
-    Router, TypedHeader,
+    TypedHeader,
 };
-use base64::Engine;
 use futures::{SinkExt, StreamExt};
-use http::{
-    header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, RANGE},
-    HeaderName, HeaderValue, Method, Request, Response, StatusCode,
-};
-use hyper::Body;
-use serde::Deserialize;
 use serde_json::Value;
 use tokio::net::TcpStream;
-use tower_http::{
-    cors::CorsLayer,
-    request_id::{MakeRequestUuid, SetRequestIdLayer},
-    sensitive_headers::SetSensitiveRequestHeadersLayer,
-    trace::TraceLayer,
-};
 use tracing::{Instrument, Span};
 
 use crate::{
     api::WsApiMessage,
-    utils::{axum_msg_to_tungstenite, tungstenite_msg_to_axum, QueryDisplay, WsError},
-    AppState, B64,
+    error::AppError,
+    utils::{axum_msg_to_tungstenite, tungstenite_msg_to_axum, WsError},
+    AppState,
 };
 
-const AUDIO_CACHE_HEADER: HeaderValue = HeaderValue::from_static("private, max-age=604800");
-const REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
-
-#[derive(Deserialize)]
-struct Auth {
-    #[serde(default)]
-    token: Option<String>,
-}
-
-fn extract_password_from_basic_auth(auth: &str) -> Result<String, AppError> {
-    let decoded = B64.decode(auth.trim_start_matches("Basic "))?;
-    let auth = String::from_utf8(decoded)?;
-    Ok(auth.trim_start_matches("default:").to_string())
-}
-
-fn remove_token_from_query(query: Option<&str>) -> HashMap<String, String> {
-    let mut query_map: HashMap<String, String> = query
-        .and_then(|v| serde_qs::from_str(v).ok())
-        .unwrap_or_else(HashMap::new);
-    query_map.remove("token");
-    query_map
-}
-
-fn make_span_trace<B>(req: &Request<B>) -> Span {
-    let query_map = remove_token_from_query(req.uri().query());
-
-    let request_id = req
-        .headers()
-        .get(REQUEST_ID)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("no id set");
-
-    if query_map.is_empty() {
-        tracing::debug_span!(
-            "request",
-            path = %req.uri().path(),
-            id = %request_id,
-        )
-    } else {
-        let query_display = QueryDisplay::new(query_map);
-        tracing::debug_span!(
-            "request",
-            path = %req.uri().path(),
-            query = %query_display,
-            id = %request_id,
-        )
-    }
-}
-
-pub(super) async fn handler(state: AppState) -> Result<(Router, Router), AppError> {
-    let internal_router = Router::new()
-        .route("/token/generate", get(generate_token))
-        .route("/token/revoke_all", post(revoke_all_tokens))
-        .with_state(state.clone());
-
-    let trace_layer = TraceLayer::new_for_http()
-        .make_span_with(make_span_trace)
-        .on_request(|req: &Request<Body>, _span: &Span| {
-            tracing::debug!(
-                "started processing request {} on {:?}",
-                req.method(),
-                req.version(),
-            )
-        });
-    let cors_layer = CorsLayer::new()
-        .allow_origin(tower_http::cors::Any)
-        .allow_headers([CONTENT_TYPE, CACHE_CONTROL, REQUEST_ID])
-        .allow_methods([Method::GET]);
-    let sensitive_header_layer = SetSensitiveRequestHeadersLayer::new([AUTHORIZATION]);
-    let request_id_layer = SetRequestIdLayer::new(REQUEST_ID.clone(), MakeRequestUuid);
-
-    let router = Router::new()
-        .route("/token/generate_for_music/:id", get(generate_scoped_token))
-        .route("/thumbnail/:id", get(http))
-        .route("/audio/external_id/:id", get(get_music))
-        .route("/share/audio/:token", get(get_scoped_music_file))
-        .route("/share/thumbnail/:token", get(get_scoped_music_thumbnail))
-        .route("/share/info/:token", get(get_scoped_music_info))
-        .route("/", get(metadata_ws))
-        .layer(trace_layer)
-        .layer(sensitive_header_layer)
-        .layer(cors_layer)
-        .layer(request_id_layer)
-        .with_state(state);
-
-    Ok((router, internal_router))
-}
-
-async fn revoke_all_tokens(State(app): State<AppState>) -> impl IntoResponse {
-    app.tokens.revoke_all().await;
-    tokio::spawn(async move {
-        if let Err(err) = app.tokens.write(&app.tokens_path).await {
-            tracing::error!("couldn't write tokens file: {err}");
-        }
-    });
-    StatusCode::OK
-}
-
-async fn generate_token(State(app): State<AppState>) -> Result<axum::response::Response, AppError> {
-    // generate token
-    let token = app.tokens.generate().await?;
-    // start task to write tokens
-    tokio::spawn(async move {
-        if let Err(err) = app.tokens.write(&app.tokens_path).await {
-            tracing::error!("couldn't write tokens file: {err}");
-        }
-    });
-    Ok(token.into_response())
-}
-
-async fn generate_scoped_token(
-    State(app): State<AppState>,
-    Query(query): Query<Auth>,
-    Path(music_id): Path<String>,
-) -> Result<axum::response::Response, AppError> {
-    app.verify_token(query.token).await?;
-
-    // generate token
-    let token = app.scoped_tokens.generate_for_id(music_id).await;
-    Ok(token.into_response())
-}
-
-async fn get_scoped_music_info(
-    State(app): State<AppState>,
-    Path(token): Path<String>,
-) -> Result<impl IntoResponse, AppError> {
-    let music_id = app.verify_scoped_token(token).await?;
-    let Some(info) = app.music_info.get(music_id).await else {
-        return Err("music id not found".into());
-    };
-    Ok(serde_json::to_string(&info).unwrap())
-}
-
-async fn get_scoped_music_thumbnail(
-    State(app): State<AppState>,
-    Path(token): Path<String>,
-) -> Result<Response<Body>, AppError> {
-    let music_id = app.verify_scoped_token(token).await?;
-    let Some(info) = app.music_info.get(music_id).await else {
-        return Err("music id not found".into());
-    };
-    app.make_musikcubed_request(
-        format!("thumbnail/{}", info.thumbnail_id),
-        Request::new(Body::empty()),
-    )
-    .await
-}
-
-async fn get_scoped_music_file(
-    State(app): State<AppState>,
-    Path(token): Path<String>,
-    request: Request<Body>,
-) -> Result<Response<Body>, AppError> {
-    let music_id = app.verify_scoped_token(token).await?;
-    let mut req = Request::new(Body::empty());
-    // proxy any range headers
-    if let Some(range) = request.headers().get(RANGE).cloned() {
-        req.headers_mut().insert(RANGE, range);
-    }
-    let mut resp = app
-        .make_musikcubed_request(format!("audio/external_id/{music_id}"), req)
-        .await?;
-    if resp.status().is_success() {
-        // add cache header
-        resp.headers_mut()
-            .insert(CACHE_CONTROL, AUDIO_CACHE_HEADER.clone());
-    }
-    Ok(resp)
-}
-
-async fn get_music(
-    State(app): State<AppState>,
-    Query(query): Query<Auth>,
-    req: Request<Body>,
-) -> Result<Response<Body>, AppError> {
-    http(State(app), Query(query), req).await.map(|mut resp| {
-        if resp.status().is_success() {
-            // add cache header
-            resp.headers_mut()
-                .insert(CACHE_CONTROL, AUDIO_CACHE_HEADER.clone());
-        }
-        resp
-    })
-}
-
-async fn http(
-    State(app): State<AppState>,
-    Query(auth): Query<Auth>,
-    req: Request<Body>,
-) -> Result<Response<Body>, AppError> {
-    let maybe_token = auth.token.or_else(|| {
-        req.headers()
-            .get(AUTHORIZATION)
-            .and_then(|h| h.to_str().ok())
-            .and_then(|auth| extract_password_from_basic_auth(auth).ok())
-    });
-    app.verify_token(maybe_token).await?;
-
-    // remove token from query
-    let path = req.uri().path();
-    let query_map = remove_token_from_query(req.uri().query());
-    let has_query = !query_map.is_empty();
-    let query = has_query
-        .then(|| serde_qs::to_string(&query_map).unwrap())
-        .unwrap_or_else(String::new);
-    let query_prefix = has_query.then_some("?").unwrap_or("");
-
-    let mut request = Request::new(Body::empty());
-    if let Some(range) = req.headers().get(RANGE).cloned() {
-        request.headers_mut().insert(RANGE, range);
-    }
-
-    tracing::debug!(
-        "proxying request to {}:{} with headers {:?}",
-        app.musikcubed_address,
-        app.musikcubed_http_port,
-        req.headers()
-    );
-
-    app.make_musikcubed_request(format!("{path}{query_prefix}{query}"), request)
-        .await
-}
-
-async fn metadata_ws(
+pub(crate) async fn metadata_ws(
     State(app): State<AppState>,
     TypedHeader(user_agent): TypedHeader<UserAgent>,
     ws: WebSocketUpgrade,
@@ -296,7 +57,7 @@ async fn metadata_ws(
     Ok(upgrade)
 }
 
-async fn handle_metadata_socket(
+pub(crate) async fn handle_metadata_socket(
     mut server_socket: WebSocketStream<TokioAdapter<TcpStream>>,
     mut client_socket: WebSocket,
     app: AppState,
