@@ -1,14 +1,12 @@
-use std::{collections::HashMap, fmt::Display};
+use std::collections::HashMap;
 
 use super::AppError;
 use async_tungstenite::{
-    tokio::TokioAdapter,
-    tungstenite::{protocol::CloseFrame as TungsteniteCloseFrame, Message as TungsteniteMessage},
-    WebSocketStream,
+    tokio::TokioAdapter, tungstenite::Message as TungsteniteMessage, WebSocketStream,
 };
 use axum::{
     extract::{
-        ws::{CloseFrame as AxumCloseFrame, Message as AxumMessage, WebSocket, WebSocketUpgrade},
+        ws::{Message as AxumMessage, WebSocket, WebSocketUpgrade},
         Path, Query, State,
     },
     headers::UserAgent,
@@ -23,7 +21,7 @@ use http::{
     HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode,
 };
 use hyper::Body;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 use tokio::net::TcpStream;
 use tower_http::{
@@ -34,7 +32,11 @@ use tower_http::{
 };
 use tracing::{Instrument, Span};
 
-use crate::{AppState, B64};
+use crate::{
+    api::WsApiMessage,
+    utils::{axum_msg_to_tungstenite, tungstenite_msg_to_axum, QueryDisplay, WsError},
+    AppState, B64,
+};
 
 const AUDIO_CACHE_HEADER: HeaderValue = HeaderValue::from_static("private, max-age=604800");
 const REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
@@ -59,23 +61,6 @@ fn remove_token_from_query(query: Option<&str>) -> HashMap<String, String> {
     query_map
 }
 
-struct QueryDisplay {
-    map: HashMap<String, String>,
-}
-
-impl Display for QueryDisplay {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let length = self.map.len();
-        for (index, (k, v)) in self.map.iter().enumerate() {
-            write!(f, "{k}={v}")?;
-            if index < length - 1 {
-                write!(f, "&")?;
-            }
-        }
-        Ok(())
-    }
-}
-
 fn make_span_trace<B>(req: &Request<B>) -> Span {
     let query_map = remove_token_from_query(req.uri().query());
 
@@ -92,7 +77,7 @@ fn make_span_trace<B>(req: &Request<B>) -> Span {
             id = %request_id,
         )
     } else {
-        let query_display = QueryDisplay { map: query_map };
+        let query_display = QueryDisplay::new(query_map);
         tracing::debug_span!(
             "request",
             path = %req.uri().path(),
@@ -128,7 +113,9 @@ pub(super) async fn handler(state: AppState) -> Result<(Router, Router), AppErro
         .route("/token/generate_for_music/:id", get(generate_scoped_token))
         .route("/thumbnail/:id", get(http))
         .route("/audio/external_id/:id", get(get_music))
-        .route("/audio/scoped/:id", get(get_scoped_music))
+        .route("/share/audio/:token", get(get_scoped_music_file))
+        .route("/share/thumbnail/:token", get(get_scoped_music_thumbnail))
+        .route("/share/info/:token", get(get_scoped_music_info))
         .route("/", get(metadata_ws))
         .layer(trace_layer)
         .layer(sensitive_header_layer)
@@ -188,37 +175,62 @@ async fn generate_scoped_token(
     Ok(token.into_response())
 }
 
-async fn get_scoped_music(
+async fn get_scoped_music_info(
+    State(app): State<AppState>,
+    Path(token): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let music_id = app.verify_scoped_token(token).await?;
+    let Some(info) = app.music_info.get(music_id).await else {
+        return Err("music id not found".into());
+    };
+    Ok(serde_json::to_string(&info).unwrap())
+}
+
+async fn get_scoped_music_thumbnail(
+    State(app): State<AppState>,
+    Path(token): Path<String>,
+) -> Result<Response<Body>, AppError> {
+    let music_id = app.verify_scoped_token(token).await?;
+    let Some(info) = app.music_info.get(music_id).await else {
+        return Err("music id not found".into());
+    };
+    let req = Request::builder()
+        .uri(format!(
+            "http://{}:{}/thumbnail/{}",
+            app.musikcubed_address, app.musikcubed_http_port, info.thumbnail_id
+        ))
+        .header(AUTHORIZATION, app.musikcubed_auth_header_value.clone())
+        .body(Body::empty())
+        .expect("cant fail");
+    let resp = app.client.request(req).await?;
+    Ok(resp)
+}
+
+async fn get_scoped_music_file(
     State(app): State<AppState>,
     Path(token): Path<String>,
     request: Request<Body>,
 ) -> Result<Response<Body>, AppError> {
-    if let Some(music_id) = app.scoped_tokens.verify(token).await {
-        let mut req = Request::builder()
-            .uri(format!(
-                "http://{}:{}/audio/external_id/{}",
-                app.musikcubed_address, app.musikcubed_http_port, music_id
-            ))
-            .header(AUTHORIZATION, app.musikcubed_auth_header_value.clone())
-            .body(Body::empty())
-            .expect("cant fail");
-        // proxy any range headers
-        if let Some(range) = request.headers().get(RANGE).cloned() {
-            req.headers_mut().insert(RANGE, range);
-        }
-        let mut resp = app.client.request(req).await?;
-        if resp.status().is_success() {
-            // add cache header
-            resp.headers_mut()
-                .insert(CACHE_CONTROL, AUDIO_CACHE_HEADER.clone());
-        }
-        Ok(resp)
-    } else {
-        Ok(Response::builder()
-            .status(StatusCode::UNAUTHORIZED)
-            .body("Invalid scoped token".to_string().into())
-            .expect("cant fail"))
+    let music_id = app.verify_scoped_token(token).await?;
+    let mut req = Request::builder()
+        .uri(format!(
+            "http://{}:{}/audio/external_id/{}",
+            app.musikcubed_address, app.musikcubed_http_port, music_id
+        ))
+        .header(AUTHORIZATION, app.musikcubed_auth_header_value.clone())
+        .body(Body::empty())
+        .expect("cant fail");
+    // proxy any range headers
+    if let Some(range) = request.headers().get(RANGE).cloned() {
+        req.headers_mut().insert(RANGE, range);
     }
+    let mut resp = app.client.request(req).await?;
+    if resp.status().is_success() {
+        // add cache header
+        resp.headers_mut()
+            .insert(CACHE_CONTROL, AUDIO_CACHE_HEADER.clone());
+    }
+    Ok(resp)
 }
 
 async fn get_music(
@@ -340,16 +352,6 @@ async fn metadata_ws(
     Ok(upgrade)
 }
 
-#[derive(Serialize, Deserialize)]
-struct WsApiMessage {
-    name: String,
-    r#type: String,
-    id: String,
-    #[serde(default)]
-    device_id: Option<String>,
-    options: serde_json::value::Map<String, Value>,
-}
-
 async fn handle_metadata_socket(
     mut server_socket: WebSocketStream<TokioAdapter<TcpStream>>,
     mut client_socket: WebSocket,
@@ -410,20 +412,9 @@ async fn handle_metadata_socket(
     let og_auth_reply = 'ok: {
         'err: {
             // send actual auth message to the musikcubed server
-            let auth_msg = WsApiMessage {
-                name: "authenticate".to_string(),
-                r#type: "request".to_string(),
-                id: og_auth_msg.id,
-                device_id: og_auth_msg.device_id,
-                options: {
-                    let mut map = serde_json::Map::with_capacity(1);
-                    map.insert(
-                        "password".to_string(),
-                        app.musikcubed_password.clone().into(),
-                    );
-                    map
-                },
-            };
+            let auth_msg = WsApiMessage::authenticate(app.musikcubed_password.clone())
+                .id(og_auth_msg.id)
+                .device_id(og_auth_msg.device_id.unwrap_or_default());
             let auth_msg_ser = serde_json::to_string(&auth_msg).expect("");
             if let Err(err) = server_socket
                 .send(TungsteniteMessage::Text(auth_msg_ser))
@@ -507,19 +498,35 @@ async fn handle_metadata_socket(
 
     let in_read_fut = async move {
         while let Some(res) = in_read.next().await {
+            let res = res.map_err(WsError::from);
             match res {
                 Ok(msg) => {
                     tracing::trace!("got message from client: {msg:?}");
-                    let res = out_write.send(axum_msg_to_tungstenite(msg)).await;
+                    let res = out_write
+                        .send(axum_msg_to_tungstenite(msg))
+                        .await
+                        .map_err(WsError::from);
                     if let Err(err) = res {
-                        tracing::error!("could not write to server socket: {err}");
-                        break;
+                        match err {
+                            WsError::Closed(reason) => {
+                                tracing::error!("server socket was closed: {reason}");
+                                break;
+                            }
+                            err => {
+                                tracing::error!("could not write to server socket: {err}");
+                            }
+                        }
                     }
                 }
-                Err(err) => {
-                    tracing::error!("could not read from client socket: {err}");
-                    break;
-                }
+                Err(err) => match err {
+                    WsError::Closed(reason) => {
+                        tracing::error!("client socket was closed, {reason}");
+                        break;
+                    }
+                    err => {
+                        tracing::error!("could not read from client socket: {err}");
+                    }
+                },
             }
         }
         let _ = out_write.send(TungsteniteMessage::Close(None)).await;
@@ -528,19 +535,36 @@ async fn handle_metadata_socket(
 
     let in_write_fut = async move {
         while let Some(res) = out_read.next().await {
+            let res = res.map_err(WsError::from);
             match res {
                 Ok(msg) => {
                     tracing::trace!("got message from server: {msg:?}");
-                    let res = in_write.send(tungstenite_msg_to_axum(msg)).await;
+                    let res = in_write
+                        .send(tungstenite_msg_to_axum(msg))
+                        .await
+                        .map_err(WsError::from);
                     if let Err(err) = res {
-                        tracing::error!("could not write to client socket: {err}");
+                        match err {
+                            WsError::Closed(reason) => {
+                                tracing::error!("client socket was closed, {reason}");
+                                break;
+                            }
+                            err => {
+                                tracing::error!("could not write to server socket: {err}");
+                            }
+                        }
                         break;
                     }
                 }
-                Err(err) => {
-                    tracing::error!("could not read from server socket: {err}");
-                    break;
-                }
+                Err(err) => match err {
+                    WsError::Closed(reason) => {
+                        tracing::error!("server socket was closed, {reason}");
+                        break;
+                    }
+                    err => {
+                        tracing::error!("could not read from server socket: {err}");
+                    }
+                },
             }
         }
         let _ = in_write.send(AxumMessage::Close(None)).await;
@@ -550,47 +574,4 @@ async fn handle_metadata_socket(
     let _ = tokio::join!(in_read_task, in_write_task);
 
     tracing::debug!("ending metadata ws task");
-}
-
-#[inline(always)]
-fn tungstenite_msg_to_axum(msg: TungsteniteMessage) -> AxumMessage {
-    match msg {
-        TungsteniteMessage::Text(data) => AxumMessage::Text(data),
-        TungsteniteMessage::Binary(data) => AxumMessage::Binary(data),
-        TungsteniteMessage::Ping(data) => AxumMessage::Ping(data),
-        TungsteniteMessage::Pong(data) => AxumMessage::Pong(data),
-        TungsteniteMessage::Close(frame) => {
-            AxumMessage::Close(frame.map(tungstenite_close_frame_to_axum))
-        }
-        TungsteniteMessage::Frame(_) => unreachable!("we don't use raw frames"),
-    }
-}
-
-#[inline(always)]
-fn axum_msg_to_tungstenite(msg: AxumMessage) -> TungsteniteMessage {
-    match msg {
-        AxumMessage::Text(data) => TungsteniteMessage::Text(data),
-        AxumMessage::Binary(data) => TungsteniteMessage::Binary(data),
-        AxumMessage::Ping(data) => TungsteniteMessage::Ping(data),
-        AxumMessage::Pong(data) => TungsteniteMessage::Pong(data),
-        AxumMessage::Close(frame) => {
-            TungsteniteMessage::Close(frame.map(axum_close_frame_to_tungstenite))
-        }
-    }
-}
-
-#[inline(always)]
-fn tungstenite_close_frame_to_axum(frame: TungsteniteCloseFrame) -> AxumCloseFrame {
-    AxumCloseFrame {
-        code: frame.code.into(),
-        reason: frame.reason,
-    }
-}
-
-#[inline(always)]
-fn axum_close_frame_to_tungstenite(frame: AxumCloseFrame) -> TungsteniteCloseFrame {
-    TungsteniteCloseFrame {
-        code: frame.code.into(),
-        reason: frame.reason,
-    }
 }

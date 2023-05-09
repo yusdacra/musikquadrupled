@@ -619,6 +619,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "tungstenite 0.18.0",
 ]
 
 [[package]]

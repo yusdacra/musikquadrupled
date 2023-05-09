@@ -8,6 +8,14 @@ type BoxedError = Box<dyn std::error::Error>;
 #[derive(Debug)]
 pub(crate) struct AppError {
     internal: BoxedError,
+    status: Option<StatusCode>,
+}
+
+impl AppError {
+    pub(crate) fn status(mut self, code: StatusCode) -> Self {
+        self.status = Some(code);
+        self
+    }
 }
 
 impl<E> From<E> for AppError
@@ -17,6 +25,7 @@ where
     fn from(err: E) -> Self {
         Self {
             internal: err.into(),
+            status: None,
         }
     }
 }
@@ -24,7 +33,7 @@ where
 impl IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
         (
-            StatusCode::INTERNAL_SERVER_ERROR,
+            self.status.unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
             format!("Something went wrong: {}", self.internal),
         )
             .into_response()
