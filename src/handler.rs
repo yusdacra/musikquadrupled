@@ -153,22 +153,7 @@ async fn generate_scoped_token(
     Query(query): Query<Auth>,
     Path(music_id): Path<String>,
 ) -> Result<axum::response::Response, AppError> {
-    let maybe_token = query.token;
-
-    'ok: {
-        if let Some(token) = maybe_token {
-            if app.tokens.verify(token).await? {
-                tracing::debug!("verified token");
-                break 'ok;
-            }
-        }
-        tracing::debug!("invalid token");
-        return Ok((
-            StatusCode::UNAUTHORIZED,
-            "Invalid token or token not present",
-        )
-            .into_response());
-    }
+    app.verify_token(query.token).await?;
 
     // generate token
     let token = app.scoped_tokens.generate_for_id(music_id).await;
@@ -276,19 +261,7 @@ async fn http(
             .and_then(|auth| extract_password_from_basic_auth(auth).ok())
     });
 
-    'ok: {
-        if let Some(token) = maybe_token {
-            if app.tokens.verify(token).await? {
-                tracing::debug!("verified token");
-                break 'ok;
-            }
-        }
-        tracing::debug!("invalid token");
-        return Ok(Response::builder()
-            .status(StatusCode::UNAUTHORIZED)
-            .body("Invalid token or token not present".to_string().into())
-            .expect("cant fail"));
-    }
+    app.verify_token(maybe_token).await?;
 
     // proxy only the headers we need
     let headers = {

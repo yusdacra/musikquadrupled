@@ -174,6 +174,18 @@ impl AppStateInternal {
             AppError::from("Invalid token or not authorized").status(http::StatusCode::UNAUTHORIZED)
         })
     }
+
+    async fn verify_token(&self, maybe_token: Option<impl AsRef<str>>) -> Result<(), AppError> {
+        if let Some(token) = maybe_token {
+            if self.tokens.verify(token).await? {
+                tracing::debug!("verified token");
+                return Ok(());
+            }
+        }
+        tracing::debug!("invalid token");
+        Err(AppError::from("Invalid token or token not present")
+            .status(http::StatusCode::UNAUTHORIZED))
+    }
 }
 
 #[derive(Clone, Deserialize, Serialize)]
