@@ -73,12 +73,9 @@ pub(super) async fn handler(state: AppState) -> Result<(Router, Router), AppErro
     let request_id_layer = SetRequestIdLayer::new(REQUEST_ID.clone(), MakeRequestUuid);
 
     let router = Router::new()
-        .route(
-            "/token/generate_for_music/:id",
-            get(handlers::generate_scoped_token),
-        )
         .route("/thumbnail/:id", get(handlers::http))
         .route("/audio/external_id/:id", get(handlers::get_music))
+        .route("/share/generate/:id", get(handlers::generate_scoped_token))
         .route("/share/audio/:token", get(handlers::get_scoped_music_file))
         .route(
             "/share/thumbnail/:token",
