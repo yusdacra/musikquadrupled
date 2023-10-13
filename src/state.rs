@@ -53,13 +53,20 @@ impl AppStateInternal {
         let tokens_path = get_conf("TOKENS_FILE")?;
 
         let music_info = MusicInfoMap::new();
-        music_info
-            .read(
-                musikcubed_password.clone(),
+        let fetch_music_info = || {
+            music_info.read(
+                &musikcubed_password,
                 &musikcubed_address,
                 musikcubed_metadata_port,
             )
-            .await?;
+        };
+        let mut result = fetch_music_info().await;
+        while let Err(err) = result {
+            tracing::error!("error while trying to fetch music metadata from musikcubed: {err}");
+            tracing::info!("trying again in 5 seconds...");
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            result = fetch_music_info().await;
+        }
 
         let this = Self {
             client: Client::new(),
