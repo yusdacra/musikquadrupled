@@ -56,7 +56,7 @@ impl Tokens {
     pub async fn write(&self, path: impl AsRef<Path>) -> Result<(), AppError> {
         let mut contents = String::new();
         self.hashed
-            .for_each_async(|hash| {
+            .scan_async(|hash| {
                 writeln!(&mut contents, "{hash}").expect("if this fails then too bad")
             })
             .await;

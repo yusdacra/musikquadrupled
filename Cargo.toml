@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 axum = {version = "0.6", features = ["ws", "headers"]}
-axum-server = {version = "0.4", features = ["tls-rustls"]}
+axum-server = {version = "0.5", features = ["tls-rustls"]}
 tokio = {version = "1", features = ["rt-multi-thread"]}
 dotenvy = "0.15"
 tracing = "0.1"
@@ -13,13 +13,13 @@ tracing-subscriber = {version = "0.3", features = ["env-filter"]}
 tower-http = {version = "0.4", features = ["trace", "cors", "sensitive-headers", "request-id"]}
 hyper = {version = "0.14", features = ["client"]}
 http = "0.2"
-async-tungstenite = {version = "0.21", features = ["tokio-runtime"]}
-axum-tungstenite = {package = "tungstenite", version = "0.18"}
+async-tungstenite = {version = "0.23", features = ["tokio-runtime"]}
+axum-tungstenite = {package = "tungstenite", version = "0.20"}
 futures = {version = "0.3"}
 serde = {version = "1", features = ["derive"]}
 serde_json = "1"
-rust-argon2 = "1.0"
+rust-argon2 = "2.0"
 rand = "0.8"
-scc = "1"
+scc = "2"
 base64 = "0.21"
 serde_qs = "0.12"
