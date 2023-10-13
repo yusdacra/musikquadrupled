@@ -13,7 +13,7 @@ fn get_current_time() -> u64 {
 }
 
 fn hash_string(data: &[u8]) -> Result<String, argon2::Error> {
-    argon2::hash_encoded(data, "11111111".as_bytes(), &argon2::Config::default())
+    argon2::hash_encoded(data, "11111111".as_bytes(), &argon2::Config::original())
 }
 
 fn generate_random_string(len: usize) -> String {
