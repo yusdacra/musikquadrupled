@@ -21,10 +21,7 @@
         crateName = "musikquadrupled";
         crateOutputs = config.nci.outputs.${crateName};
       in {
-        nci.projects.${crateName}.relPath = "";
-        nci.crates.${crateName} = {
-          export = true;
-        };
+        nci.projects.${crateName}.path = ./.;
         devShells.default = crateOutputs.devShell.overrideAttrs (old: {
           RUST_SRC_PATH = "${config.nci.toolchains.shell}/lib/rustlib/src/rust/library";
           packages =

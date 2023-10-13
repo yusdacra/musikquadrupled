@@ -57,13 +57,16 @@ async fn app() -> Result<(), AppError> {
     let state = AppState::new(AppStateInternal::new(public_port).await?);
     let (public_router, internal_router) = router::handler(state).await?;
 
+    let internal_addr = SocketAddr::from(([127, 0, 0, 1], internal_port));
     let internal_make_service = internal_router.into_make_service();
     let internal_task = tokio::spawn(
-        axum_server::bind(SocketAddr::from(([127, 0, 0, 1], internal_port)))
-            .serve(internal_make_service),
+        axum_server::bind(internal_addr).serve(internal_make_service),
     );
+    info!("internal: listening on http://{internal_addr}");
 
     let public_addr = SocketAddr::from(([127, 0, 0, 1], public_port));
+    info!("will listen on {{http,https}}://{public_addr}");
+
     let public_make_service = public_router.into_make_service();
     let (pub_task, scheme) = if let (Some(cert_path), Some(key_path)) = (cert_path, key_path) {
         info!("cert path is: {cert_path}");
